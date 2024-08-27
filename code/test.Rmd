@@ -1,0 +1,188 @@
+```{r setup}
+library(tidyverse)
+library(fixest)
+```
+
+```{r}
+# 3期、covariate8つ
+set.seed(14)
+
+N <- 100
+max_time <- 3
+treatment_ratio <- 0.5
+treatment_time <- 2
+
+b0 <- 1
+b1 <- 0.5
+b2 <- 0.3
+b3 <- 0.2
+
+gamma <- 1
+
+# y = b0 + b1*x1 + b2*x2 + b3*x3 + b4*x4 + b5*x5 + b6*x6 + b7*x7 + id_fe + time_fe + gamma*D  + e
+# D = 1 if time = 3, 0 otherwise
+# e ~ N(0, 1)
+
+df <- tibble(
+  id = rep(1:N, each = max_time),
+  isTreated = rep(rbinom(N, 1, treatment_ratio), each = max_time),
+  x1 = rnorm(N*max_time),
+  x2 = rnorm(N*max_time),
+  x3 = rnorm(N*max_time),
+  time = rep(1:max_time, N),
+  id_fe = rep(rnorm(N), each = max_time),
+  time_fe = rep(rnorm(max_time), N)
+) %>% 
+  mutate(
+    D = ifelse(time > treatment_time & isTreated == 1, 1, 0),
+    y = b0 + b1*x1 + b2*x2 + b3*x3 + id_fe + time_fe + gamma*D + rnorm(N*max_time)
+  )
+
+main_result <- feols(y ~ x1 + x2 + x3 + D | id + time, data = df)
+diag_result <- feols(
+  y ~ x1 + x2 + x3 + diagD | id + time,
+  data = df %>% 
+    mutate(diagD = isTreated * (time == treatment_time)) %>% 
+    filter(time <= treatment_time)
+) 
+
+main_coef <- main_result$coeftable[4,1]
+main_pvalue <- main_result$coeftable[4,4]
+diag_pvalue <- diag_result$coeftable[4,4]
+```
+
+```{r}
+M <- 1000
+
+list_main_coef <- numeric(M)
+list_main_pvalue <- numeric(M)
+list_diag_pvalue <- numeric(M)
+
+for(i in 1:M){
+  df <- tibble(
+    id = rep(1:N, each = max_time),
+    isTreated = rep(rbinom(N, 1, treatment_ratio), each = max_time),
+    x1 = rnorm(N*max_time),
+    x2 = rnorm(N*max_time),
+    x3 = rnorm(N*max_time),
+    time = rep(1:max_time, N),
+    id_fe = rep(rnorm(N), each = max_time),
+    time_fe = rep(rnorm(max_time), N)
+  ) %>% 
+    mutate(
+      D = ifelse(time > treatment_time & isTreated == 1, 1, 0),
+      y = b0 + b1*x1 + b2*x2 + b3*x3 + id_fe + time_fe + gamma*D + rnorm(N*max_time)
+    )
+  
+  main_result <- feols(y ~ x1 + x2 + x3 + D | id + time, data = df)
+  diag_result <- feols(
+    y ~ x1 + x2 + x3 + diagD | id + time,
+    data = df %>% 
+      mutate(diagD = isTreated * (time == treatment_time)) %>% 
+      filter(time <= treatment_time)
+  ) 
+  
+  list_main_coef[i] <- main_result$coeftable[4,1]
+  list_main_pvalue[i] <- main_result$coeftable[4,4]
+  list_diag_pvalue[i] <- diag_result$coeftable[4,4]
+}
+
+result_df <- tibble(
+  mainCoef = list_main_coef,
+  mainPValue = list_main_pvalue,
+  diagPValue = list_diag_pvalue
+) %>% 
+  mutate(
+    mainReject = mainPValue < 0.05,
+    diagReject95 = diagPValue < 0.05,
+    diagReject80 = diagPValue < 0.2,
+  )
+```
+
+```{r}
+ggplot(result_df, aes(x = mainReject)) +
+  geom_bar() +
+  labs(title = "Diagonal test", x = "Reject", y = "Frequency") +
+  facet_wrap(~diagReject95, scales = "free")
+```
+
+```{r}
+ggplot(result_df, aes(x = mainCoef)) +
+  geom_histogram(aes(fill = diagReject95)) +
+  labs(title = "Diagonal test", x = "Reject", y = "Frequency") +
+  facet_wrap(~diagReject95, scales = "free")
+```
+
+```{r}
+summary_result_df_95 <- result_df %>% 
+  group_by(diagReject95) %>% 
+  summarise(
+    mainCoefMean = mean(mainCoef),
+    mainRejectedRatio = mean(mainReject)
+  )
+
+summary_result_df_80 <- result_df %>%
+  group_by(diagReject80) %>% 
+  summarise(
+    mainCoefMean = mean(mainCoef),
+    mainRejectedRatio = mean(mainReject)
+  )
+
+summary_result_df <- result_df %>% 
+  summarise(
+    mainCoefMean = mean(mainCoef),
+    mainRejectedRatio = mean(mainReject)
+  )
+```
+
+```{r}
+mean(result_df$mainCoef)
+mean(filter(result_df, diagReject95 == FALSE)$mainCoef)
+mean(filter(result_df, diagReject80 == FALSE)$mainCoef)
+
+1 - mean(result_df$mainReject)
+1 - mean(filter(result_df, diagReject95 == FALSE)$mainReject)
+1 - mean(filter(result_df, diagReject80 == FALSE)$mainReject)
+```
+
+```{r}
+df_overall <- read.csv("data/simulation_result.csv")
+
+df_overall %>% 
+  ggplot() +
+  geom_density(aes(x = mainCoef, fill = "overall"), alpha = 0.2) +
+  geom_density(aes(x = mainCoef95, fill = "95%"), alpha = 0.2) +
+  geom_density(aes(x = mainCoef80, fill = "80%"), alpha = 0.2) +
+  geom_density(aes(x = mainCoef50, fill = "50%"), alpha = 0.2) +
+  geom_vline(xintercept = c(
+    mean(df_overall$mainCoef),
+    mean(df_overall$mainCoef95),
+    mean(df_overall$mainCoef80),
+    mean(df_overall$mainCoef50)
+  ), linetype = "dashed", color = c("red", "green", "blue", "purple"), linewidth = 0.2) +
+  labs(title = "Main Coef", x = "Value", y = "Density") +
+  theme_minimal()
+```
+
+```{r}
+df_overall %>% 
+  ggplot() +
+  geom_density(aes(x = rejectedRatio, fill = "overall"), alpha = 0.2) +
+  geom_density(aes(x = rejectedRatio95, fill = "95%"), alpha = 0.2) +
+  geom_density(aes(x = rejectedRatio80, fill = "80%"), alpha = 0.2) +
+  geom_density(aes(x = rejectedRatio50, fill = "50%"), alpha = 0.2) +
+  geom_vline(xintercept = c(
+    mean(df_overall$rejectedRatio),
+    mean(df_overall$rejectedRatio95),
+    mean(df_overall$rejectedRatio80),
+    mean(df_overall$rejectedRatio50)
+  ), linetype = "dashed", color = c("red", "green", "blue", "purple"), linewidth = 0.2) +
+  labs(title = "Rejected Ratio", x = "Value", y = "Density") +
+  theme_minimal()
+```
+
+```{r}
+df <- read.csv("data/simulation_data_one_permutation.csv")
+
+```
+
